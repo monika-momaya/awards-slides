@@ -84,36 +84,12 @@ def group_rows(rows):
     return nominee_groups, winner_groups
 
 
-def detect_role(slide):
-    text = " ".join([shape.text for shape in slide.shapes if hasattr(shape, "text") and shape.text]).lower()
-    if "nominees" in text:
-        return "nominee"
-    if "winner" in text:
-        return "winner"
-    return "generic"
-
-
-def set_text(shape, text):
-    tf = shape.text_frame
-    tf.clear()
-    p = tf.paragraphs[0]
-    run = p.add_run()
-    run.text = text
-    run.font.size = Pt(22)
-
-
-def fill_slide(slide, mapping):
-    for shape in slide.shapes:
-        if not hasattr(shape, "text"):
-            continue
-        low = (shape.text or "").lower()
-        for token, key in TOKENS.items():
-            if token.lower() in low:
-                set_text(shape, mapping.get(key, ""))
-            elif key == "NOMINEES_WORD" and token.lower() == "<<nominees-word>>":
-                set_text(shape, "NOMINEES")
-            elif key == "WINNER_WORD" and token.lower() == "<<winner-word>>":
-                set_text(shape, "WINNER")
+def find_slide_with_token(prs, token):
+    for s in prs.slides:
+        txt = " ".join([shape.text for shape in s.shapes if hasattr(shape, "text") and shape.text]).lower()
+        if token.lower() in txt:
+            return s
+    return None
 
 
 def clone_template_slide(template_slide, out_prs):
@@ -125,6 +101,13 @@ def clone_template_slide(template_slide, out_prs):
         slide.shapes._spTree.insert_element_before(copy.deepcopy(shape.element), 'p:extLst')
     return slide
 
+
+def pick_template_slides(prs):
+    nominee = find_slide_with_token(prs, '<<Nominee Name>>') or (prs.slides[0] if len(prs.slides) > 0 else None)
+    winner = find_slide_with_token(prs, '<<Winner Name>>') or (prs.slides[1] if len(prs.slides) > 1 else nominee)
+    if nominee is None or winner is None:
+        raise RuntimeError('Template must contain at least a nominee slide and a winner slide.')
+    return nominee, winner
 
 def pick_template_slides(prs):
     if len(prs.slides) == 1:
@@ -143,35 +126,34 @@ def build_deck(excel_path, template_path):
     out.slide_width = prs.slide_width
     out.slide_height = prs.slide_height
 
-    keys = sorted(set(nominee_groups) | set(winner_groups), key=lambda x: (x[1], x[0]))
+    keys = sorted(set(nominee_groups) | set(winner_groups), key=lambda x: (x[0], x[1]))
     for key in keys:
         zone, category = key
         if key in nominee_groups:
             entries = nominee_groups[key]
             slide = clone_template_slide(nominee_tpl, out)
             fill_slide(slide, {
-                "ZONE": zone,
-                "AWARD CATEGORY": category,
-                "NOMINEES": "\n".join(e["nominee_name"] for e in entries),
-                "NOMINEES_WORD": "NOMINEES",
-                "PLACEHOLDER_X": entries[0]["placeholder_x"],
-                "PLACEHOLDER_Y": entries[0]["placeholder_y"],
-                "PLACEHOLDER_Z": entries[0]["placeholder_z"],
+                'ZONE': zone,
+                'AWARD CATEGORY': category,
+                'NOMINEES': '\n'.join(e['nominee_name'] for e in entries),
+                'NOMINEES_WORD': 'NOMINEES',
+                'PLACEHOLDER_X': entries[0]['placeholder_x'],
+                'PLACEHOLDER_Y': entries[0]['placeholder_y'],
+                'PLACEHOLDER_Z': entries[0]['placeholder_z'],
             })
         if key in winner_groups:
             entries = winner_groups[key]
             slide = clone_template_slide(winner_tpl, out)
             fill_slide(slide, {
-                "ZONE": zone,
-                "AWARD CATEGORY": category,
-                "WINNER": "\n".join(e["winner_name"] for e in entries),
-                "WINNER_WORD": "WINNER",
-                "PLACEHOLDER_X": entries[0]["placeholder_x"],
-                "PLACEHOLDER_Y": entries[0]["placeholder_y"],
-                "PLACEHOLDER_Z": entries[0]["placeholder_z"],
+                'ZONE': zone,
+                'AWARD CATEGORY': category,
+                'WINNER': '\n'.join(e['winner_name'] for e in entries),
+                'WINNER_WORD': 'WINNER',
+                'PLACEHOLDER_X': entries[0]['placeholder_x'],
+                'PLACEHOLDER_Y': entries[0]['placeholder_y'],
+                'PLACEHOLDER_Z': entries[0]['placeholder_z'],
             })
     return out
-
 
 def main():
     if len(sys.argv) != 4:
