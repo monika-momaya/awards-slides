@@ -1,36 +1,32 @@
 # Award Slide Generator
 
+## Files
+- generate_award_slides.py — core logic (Excel parsing, slide duplication, template preservation)
+- streamlit_app.py — web UI
+- requirements.txt — dependencies
+
 ## Excel format
-Use this header row:
 Award Category | Nominee Name | Winner Name | Zone | Placeholder X | Placeholder Y | Placeholder Z
 
-Rules:
-- `Nominee Name` is for nominee rows.
-- `Winner Name` is for winner rows.
-- If a category has both nominees and a winner, keep them as separate rows.
-- `Zone` is optional but recommended.
-- `Placeholder X/Y/Z` are reserved for future use.
+- Nominee rows use Nominee Name.
+- Winner rows use Winner Name.
+- Keep nominee and winner rows separate.
+- Zone is optional but recommended.
 
 ## PowerPoint template
-Upload a PPTX with two slides if you want both nominee and winner outputs:
-- Nominee slide: contains `<<NOMINEES>>`
-- Winner slide: contains `<<WINNER>>`
-
-All placeholders are optional.
+Upload a PPTX with:
+- a nominee slide containing <<Nominee Name>> (or <<NOMINEES>>)
+- a winner slide containing <<Winner Name>> (or <<WINNER>>)
 
 Supported tokens:
-- `<<ZONE>>`
-- `<<AWARD CATEGORY>>`
-- `<<NOMINEES>>`
-- `<<WINNER>>`
-- `<<nominees-word>>` -> literal `NOMINEES`
-- `<<winner-word>>` -> literal `WINNER`
-- `<<PLACEHOLDER X>>`
-- `<<PLACEHOLDER Y>>`
-- `<<PLACEHOLDER Z>>`
+<<ZONE>>, <<AWARD CATEGORY>>, <<NOMINEES>>, <<WINNER>>, <<nominees-word>>, <<winner-word>>,
+<<PLACEHOLDER X>>, <<PLACEHOLDER Y>>, <<PLACEHOLDER Z>>
 
-## Slide behavior
-- Nominee slides are grouped by `Zone + Award Category`.
-- Winner slides are grouped by `Zone + Award Category`.
-- Winner slides appear after nominee slides for the same category.
-- The template background/design is preserved by cloning the matching template slide.
+## Behavior
+- Winner slides appear after nominee slides for the same Zone + Category.
+- The actual template slide (background, images, design) is duplicated at the XML level,
+  so the original design is preserved exactly — not reconstructed from scratch.
+
+## Run locally
+pip install -r requirements.txt
+streamlit run streamlit_app.py

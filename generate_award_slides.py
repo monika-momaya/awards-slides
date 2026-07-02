@@ -9,6 +9,7 @@ from collections import defaultdict
 import openpyxl
 from pptx import Presentation
 from pptx.util import Pt
+from pptx.oxml.ns import qn
 
 HEADER_MAP = {
     "award category": "award_category",
@@ -21,15 +22,17 @@ HEADER_MAP = {
 }
 
 TOKENS = {
-    "<<ZONE>>": "ZONE",
-    "<<AWARD CATEGORY>>": "AWARD CATEGORY",
-    "<<NOMINEES>>": "NOMINEES",
-    "<<WINNER>>": "WINNER",
+    "<<zone>>": "ZONE",
+    "<<award category>>": "AWARD CATEGORY",
+    "<<nominees>>": "NOMINEES",
+    "<<winner>>": "WINNER",
+    "<<nominee name>>": "NOMINEES",
+    "<<winner name>>": "WINNER",
     "<<nominees-word>>": "NOMINEES_WORD",
     "<<winner-word>>": "WINNER_WORD",
-    "<<PLACEHOLDER X>>": "PLACEHOLDER_X",
-    "<<PLACEHOLDER Y>>": "PLACEHOLDER_Y",
-    "<<PLACEHOLDER Z>>": "PLACEHOLDER_Z",
+    "<<placeholder x>>": "PLACEHOLDER_X",
+    "<<placeholder y>>": "PLACEHOLDER_Y",
+    "<<placeholder z>>": "PLACEHOLDER_Z",
 }
 
 
@@ -84,89 +87,175 @@ def group_rows(rows):
     return nominee_groups, winner_groups
 
 
-def find_slide_with_token(prs, token):
-    for s in prs.slides:
+def find_slide_index_with_token(prs, token):
+    token = token.lower()
+    for i, s in enumerate(prs.slides):
         txt = " ".join([shape.text for shape in s.shapes if hasattr(shape, "text") and shape.text]).lower()
-        if token.lower() in txt:
-            return s
+        if token in txt:
+            return i
     return None
 
 
-def clone_template_slide(template_slide, out_prs):
-    slide = out_prs.slides.add_slide(out_prs.slide_layouts[6])
-    for shape in list(slide.shapes):
-        el = shape.element
-        el.getparent().remove(el)
-    for shape in template_slide.shapes:
-        slide.shapes._spTree.insert_element_before(copy.deepcopy(shape.element), 'p:extLst')
-    return slide
+def pick_template_indices(prs):
+    nominee_idx = find_slide_index_with_token(prs, "<<nominee name>>")
+    if nominee_idx is None:
+        nominee_idx = find_slide_index_with_token(prs, "<<nominees>>")
+    winner_idx = find_slide_index_with_token(prs, "<<winner name>>")
+    if winner_idx is None:
+        winner_idx = find_slide_index_with_token(prs, "<<winner>>")
+    if nominee_idx is None and len(prs.slides) > 0:
+        nominee_idx = 0
+    if winner_idx is None and len(prs.slides) > 1:
+        winner_idx = 1
+    if winner_idx is None:
+        winner_idx = nominee_idx
+    if nominee_idx is None or winner_idx is None:
+        raise RuntimeError("Template must contain at least one slide with nominee or winner placeholders.")
+    return nominee_idx, winner_idx
 
 
-def pick_template_slides(prs):
-    nominee = find_slide_with_token(prs, '<<Nominee Name>>') or (prs.slides[0] if len(prs.slides) > 0 else None)
-    winner = find_slide_with_token(prs, '<<Winner Name>>') or (prs.slides[1] if len(prs.slides) > 1 else nominee)
-    if nominee is None or winner is None:
-        raise RuntimeError('Template must contain at least a nominee slide and a winner slide.')
-    return nominee, winner
+def duplicate_slide(prs, index):
+    """Duplicate slide at index inside prs, preserving all shapes, images, and background exactly."""
+    source = prs.slides[index]
+    blank_slide_layout = source.slide_layout
+    dest = prs.slides.add_slide(blank_slide_layout)
 
-def pick_template_slides(prs):
-    if len(prs.slides) == 1:
-        return prs.slides[0], prs.slides[0]
-    if len(prs.slides) >= 2:
-        return prs.slides[0], prs.slides[1]
-    raise RuntimeError("Template has no slides")
+    # Remove any placeholder shapes auto-added by the layout
+    for shape in list(dest.shapes):
+        shape._element.getparent().remove(shape._element)
+
+    # Build a mapping of old rId -> new rId for all non-external relationships
+    # (images, media, etc.) referenced by the source slide.
+    rid_map = {}
+    for rel_id, rel in source.part.rels.items():
+        if rel.is_external:
+            continue
+        new_rid = dest.part.relate_to(rel.target_part, rel.reltype)
+        rid_map[rel_id] = new_rid
+
+    def remap_rids(element):
+        for attr_name in ("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed",
+                          "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}link",
+                          "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"):
+            old_rid = element.get(attr_name)
+            if old_rid and old_rid in rid_map:
+                element.set(attr_name, rid_map[old_rid])
+        for child in element:
+            remap_rids(child)
+
+    # Copy every shape element from source slide (preserves text, images, groups, formatting)
+    for shape in source.shapes:
+        new_el = copy.deepcopy(shape._element)
+        remap_rids(new_el)
+        dest.shapes._spTree.append(new_el)
+
+    # Copy background (bg element) if present at slide level, remapping any image rIds too
+    src_bg = source._element.find(qn('p:bg'))
+    if src_bg is not None:
+        new_bg = copy.deepcopy(src_bg)
+        remap_rids(new_bg)
+        dest_bg = dest._element.find(qn('p:bg'))
+        if dest_bg is not None:
+            dest._element.remove(dest_bg)
+        dest._element.insert(0, new_bg)
+
+    return dest
+
+
+def move_slide(prs, old_index, new_index):
+    xml_slides = prs.slides._sldIdLst
+    slides = list(xml_slides)
+    xml_slides.remove(slides[old_index])
+    xml_slides.insert(new_index, slides[old_index])
+
+
+def delete_slide(prs, index):
+    xml_slides = prs.slides._sldIdLst
+    slides = list(xml_slides)
+    rId = slides[index].get(qn('r:id'))
+    prs.part.drop_rel(rId)
+    xml_slides.remove(slides[index])
+
+
+def set_text(shape, text):
+    tf = shape.text_frame
+    tf.clear()
+    p = tf.paragraphs[0]
+    run = p.add_run()
+    run.text = text
+    if run.font.size is None:
+        run.font.size = Pt(22)
+
+
+def fill_shapes_recursive(shapes, mapping):
+    for shape in shapes:
+        if shape.shape_type == 6 and hasattr(shape, "shapes"):  # group shape
+            fill_shapes_recursive(shape.shapes, mapping)
+            continue
+        if not hasattr(shape, "text_frame") or not shape.has_text_frame:
+            continue
+        text = shape.text_frame.text
+        if not text:
+            continue
+        low = text.lower()
+        matched = False
+        for token, key in TOKENS.items():
+            if token in low:
+                set_text(shape, mapping.get(key, ""))
+                matched = True
+                break
 
 
 def fill_slide(slide, mapping):
-    for shape in slide.shapes:
-        if not hasattr(shape, "text"):
-            continue
-        txt = shape.text or ""
-        for token, value in mapping.items():
-            if token.lower() in txt.lower():
-                try:
-                    shape.text = value
-                except Exception:
-                    pass
+    fill_shapes_recursive(slide.shapes, mapping)
 
 
 def build_deck(excel_path, template_path):
     rows = read_rows(excel_path)
     nominee_groups, winner_groups = group_rows(rows)
+
     prs = Presentation(template_path)
-    nominee_tpl, winner_tpl = pick_template_slides(prs)
-    out = Presentation()
-    out.slide_width = prs.slide_width
-    out.slide_height = prs.slide_height
+    nominee_idx, winner_idx = pick_template_indices(prs)
+    total_original = len(prs.slides)
 
     keys = sorted(set(nominee_groups) | set(winner_groups), key=lambda x: (x[0], x[1]))
+
+    generated_indices = []
     for key in keys:
         zone, category = key
         if key in nominee_groups:
             entries = nominee_groups[key]
-            slide = clone_template_slide(nominee_tpl, out)
-            fill_slide(slide, {
-                'ZONE': zone,
-                'AWARD CATEGORY': category,
-                'NOMINEES': '\n'.join(e['nominee_name'] for e in entries),
-                'NOMINEES_WORD': 'NOMINEES',
-                'PLACEHOLDER_X': entries[0]['placeholder_x'],
-                'PLACEHOLDER_Y': entries[0]['placeholder_y'],
-                'PLACEHOLDER_Z': entries[0]['placeholder_z'],
+            new_slide = duplicate_slide(prs, nominee_idx)
+            fill_slide(new_slide, {
+                "ZONE": zone,
+                "AWARD CATEGORY": category,
+                "NOMINEES": "\n".join(e["nominee_name"] for e in entries),
+                "NOMINEES_WORD": "NOMINEES",
+                "PLACEHOLDER_X": entries[0]["placeholder_x"],
+                "PLACEHOLDER_Y": entries[0]["placeholder_y"],
+                "PLACEHOLDER_Z": entries[0]["placeholder_z"],
             })
+            generated_indices.append(len(prs.slides.__iter__.__self__._sldIdLst) - 1)
         if key in winner_groups:
             entries = winner_groups[key]
-            slide = clone_template_slide(winner_tpl, out)
-            fill_slide(slide, {
-                'ZONE': zone,
-                'AWARD CATEGORY': category,
-                'WINNER': '\n'.join(e['winner_name'] for e in entries),
-                'WINNER_WORD': 'WINNER',
-                'PLACEHOLDER_X': entries[0]['placeholder_x'],
-                'PLACEHOLDER_Y': entries[0]['placeholder_y'],
-                'PLACEHOLDER_Z': entries[0]['placeholder_z'],
+            new_slide = duplicate_slide(prs, winner_idx)
+            fill_slide(new_slide, {
+                "ZONE": zone,
+                "AWARD CATEGORY": category,
+                "WINNER": "\n".join(e["winner_name"] for e in entries),
+                "WINNER_WORD": "WINNER",
+                "PLACEHOLDER_X": entries[0]["placeholder_x"],
+                "PLACEHOLDER_Y": entries[0]["placeholder_y"],
+                "PLACEHOLDER_Z": entries[0]["placeholder_z"],
             })
-    return out
+            generated_indices.append(len(prs.slides.__iter__.__self__._sldIdLst) - 1)
+
+    # Remove original template slides (highest index first to keep indices valid)
+    for idx in sorted({nominee_idx, winner_idx}, reverse=True):
+        delete_slide(prs, idx)
+
+    return prs
+
 
 def main():
     if len(sys.argv) != 4:
