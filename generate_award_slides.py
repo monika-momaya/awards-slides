@@ -178,13 +178,98 @@ def delete_slide(prs, index):
 
 
 def set_text(shape, text):
+    """Replace the shape's text while preserving the original formatting
+    (font name, size, bold, italic, color, alignment, autofit/wrap behavior)
+    taken from the template placeholder."""
     tf = shape.text_frame
+    first_para = tf.paragraphs[0]
+
+    # Capture run-level formatting (rPr) and paragraph-level formatting (pPr)
+    template_rpr_xml = None
+    template_para_pPr_xml = None
+    if first_para.runs:
+        rPr = first_para.runs[0]._r.find(qn('a:rPr'))
+        if rPr is not None:
+            template_rpr_xml = copy.deepcopy(rPr)
+    pPr = first_para._p.find(qn('a:pPr'))
+    if pPr is not None:
+        template_para_pPr_xml = copy.deepcopy(pPr)
+
+    # Capture the text-frame-level bodyPr (autofit, wrap, insets) so long
+    # text shrinks-to-fit exactly as configured in the template placeholder.
+    template_bodyPr_xml = None
+    bodyPr = tf._txBody.find(qn('a:bodyPr'))
+    if bodyPr is not None:
+        template_bodyPr_xml = copy.deepcopy(bodyPr)
+
     tf.clear()
+
+    # Reapply bodyPr (autofit/wrap/insets) exactly as in the template
+    if template_bodyPr_xml is not None:
+        existing_bodyPr = tf._txBody.find(qn('a:bodyPr'))
+        if existing_bodyPr is not None:
+            tf._txBody.remove(existing_bodyPr)
+        tf._txBody.insert(0, copy.deepcopy(template_bodyPr_xml))
+
     p = tf.paragraphs[0]
-    run = p.add_run()
-    run.text = text
-    if run.font.size is None:
-        run.font.size = Pt(22)
+
+    # Reapply paragraph-level formatting (alignment, indent, etc.)
+    if template_para_pPr_xml is not None:
+        existing_pPr = p._p.find(qn('a:pPr'))
+        if existing_pPr is not None:
+            p._p.remove(existing_pPr)
+        p._p.insert(0, copy.deepcopy(template_para_pPr_xml))
+
+    lines = text.split("\n") if text else [""]
+    for i, line in enumerate(lines):
+        if i == 0:
+            para = p
+        else:
+            para = tf.add_paragraph()
+            if template_para_pPr_xml is not None:
+                para._p.insert(0, copy.deepcopy(template_para_pPr_xml))
+        run = para.add_run()
+        run.text = line
+        if template_rpr_xml is not None:
+            existing_rpr = run._r.find(qn('a:rPr'))
+            new_rpr = copy.deepcopy(template_rpr_xml)
+            if existing_rpr is not None:
+                run._r.remove(existing_rpr)
+            run._r.insert(0, new_rpr)
+        elif run.font.size is None:
+            run.font.size = Pt(22)
+
+    # Compute an explicit font scale so long multi-line lists (e.g. nominee
+    # lists) actually shrink to fit the placeholder box. Relying on an empty
+    # <a:normAutofit/> does not trigger shrinking in PowerPoint/LibreOffice
+    # unless fontScale is explicitly set, so we calculate it manually based
+    # on line count relative to a baseline of 4 lines fitting at 100%.
+    num_lines = len(lines)
+    baseline_lines = 4
+    if num_lines > baseline_lines:
+        scale_pct = max(40, int(100 * baseline_lines / num_lines))
+    else:
+        scale_pct = 100
+
+    body = tf._txBody.find(qn('a:bodyPr'))
+    if body is not None:
+        for tag in ('a:normAutofit', 'a:spAutoFit', 'a:noAutofit'):
+            existing = body.find(qn(tag))
+            if existing is not None:
+                body.remove(existing)
+        norm = body.makeelement(qn('a:normAutofit'), {})
+        if scale_pct < 100:
+            norm.set('fontScale', str(scale_pct * 1000))
+            norm.set('lnSpcReduction', str(min(20, (100 - scale_pct)) * 1000))
+        body.append(norm)
+
+    # Also directly scale each run's font size as a fallback, since some
+    # renderers (older LibreOffice versions) ignore fontScale on normAutofit.
+    if scale_pct < 100:
+        for para in tf.paragraphs:
+            for run in para.runs:
+                if run.font.size is not None:
+                    run.font.size = Pt(int(run.font.size.pt * scale_pct / 100))
 
 
 def fill_shapes_recursive(shapes, mapping):
