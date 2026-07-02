@@ -21,8 +21,12 @@ Important:
 excel = st.file_uploader('Upload Excel', type=['xlsx'])
 template = st.file_uploader('Upload PowerPoint template', type=['pptx'])
 
-if excel and template and st.button('Generate'):
-    deck = build_deck(excel, template)
-    bio = BytesIO()
-    deck.save(bio)
-    st.download_button('Download PPTX', bio.getvalue(), file_name='Award_Show_Deck.pptx')
+if excel is not None and template is not None and st.button('Generate'):
+    try:
+        deck = build_deck(excel, template)
+        bio = BytesIO()
+        deck.save(bio)
+        st.success(f'Generated {len(deck.slides)} slide(s).')
+        st.download_button('Download PPTX', bio.getvalue(), file_name='Award_Show_Deck.pptx')
+    except Exception as e:
+        st.error(f'Generation failed: {e}')

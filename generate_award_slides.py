@@ -86,9 +86,9 @@ def group_rows(rows):
 
 def detect_role(slide):
     text = " ".join([shape.text for shape in slide.shapes if hasattr(shape, "text") and shape.text]).lower()
-    if "<<nominees>>" in text or "nominees" in text:
+    if "nominees" in text:
         return "nominee"
-    if "<<winner>>" in text or "winner" in text:
+    if "winner" in text:
         return "winner"
     return "generic"
 
@@ -129,16 +129,17 @@ def clone_template_slide(template_slide, out_prs):
 def pick_template_slides(prs):
     nominee = None
     winner = None
+    generic = prs.slides[0] if len(prs.slides) > 0 else None
     for s in prs.slides:
-        r = detect_role(s)
-        if r == "nominee" and nominee is None:
+        txt = " ".join([shape.text for shape in s.shapes if hasattr(shape, "text") and shape.text]).lower()
+        if nominee is None and "nominees" in txt:
             nominee = s
-        elif r == "winner" and winner is None:
+        if winner is None and "winner" in txt:
             winner = s
-    if nominee is None and len(prs.slides) > 0:
-        nominee = prs.slides[0]
+    if nominee is None:
+        nominee = generic
     if winner is None:
-        winner = nominee
+        winner = generic if generic is not None else nominee
     return nominee, winner
 
 
@@ -151,7 +152,7 @@ def build_deck(excel_path, template_path):
     out.slide_width = prs.slide_width
     out.slide_height = prs.slide_height
 
-    keys = sorted(set(nominee_groups) | set(winner_groups), key=lambda x: (x[0], x[1]))
+    keys = sorted(set(nominee_groups) | set(winner_groups), key=lambda x: (x[1], x[0]))
     for key in keys:
         zone, category = key
         if key in nominee_groups:
