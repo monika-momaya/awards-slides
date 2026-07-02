@@ -229,11 +229,30 @@ def replace_token_in_run_list(paragraph, token, value):
             r_el = runs[i]._r
             r_el.getparent().remove(r_el)
 
+    total_lines = len(lines)
+    if total_lines > 1:
+        # When a placeholder is populated with multiple lines (e.g. a list
+        # of nominees), shrink the font proportionally so the block still
+        # fits the original placeholder box instead of overflowing at the
+        # template's single-line font size.
+        baseline_lines = 3
+        if total_lines > baseline_lines:
+            scale_pct = max(45, int(100 * baseline_lines / total_lines))
+            for run_el in paragraph._p.findall(qn("a:r")):
+                rpr = run_el.find(qn("a:rPr"))
+                if rpr is not None and rpr.get("sz"):
+                    new_sz = max(800, int(int(rpr.get("sz")) * scale_pct / 100))
+                    rpr.set("sz", str(new_sz))
+
     if rest_lines:
         template_p_el = paragraph._p
         parent = template_p_el.getparent()
         insert_at = list(parent).index(template_p_el) + 1
         template_rpr = sr._r.find(qn("a:rPr"))
+        if total_lines > baseline_lines and template_rpr is not None and template_rpr.get("sz"):
+            template_rpr = copy.deepcopy(template_rpr)
+            new_sz = max(800, int(int(template_rpr.get("sz")) * scale_pct / 100))
+            template_rpr.set("sz", str(new_sz))
         for line in rest_lines:
             new_p_el = copy.deepcopy(template_p_el)
             for r_el in new_p_el.findall(qn("a:r")):
