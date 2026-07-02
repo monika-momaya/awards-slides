@@ -1,3 +1,0 @@
-streamlit
-python-pptx
-openpyxl
