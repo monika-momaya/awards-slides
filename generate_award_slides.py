@@ -10,6 +10,7 @@ import openpyxl
 from pptx import Presentation
 from pptx.util import Pt
 from pptx.oxml.ns import qn
+from pptx.parts.slide import SlidePart
 
 HEADER_MAP = {
     "award category": "award_category",
@@ -115,180 +116,154 @@ def pick_template_indices(prs):
 
 
 def duplicate_slide(prs, index):
-    """Duplicate slide at index inside prs, preserving all shapes, images, and background exactly."""
-    source = prs.slides[index]
-    blank_slide_layout = source.slide_layout
-    dest = prs.slides.add_slide(blank_slide_layout)
+    """True slide clone at the OPC-part level: copies the slide XML part
+    byte-for-byte (preserving every font, color, schemeClr reference,
+    autofit setting, and layout/master linkage exactly), then registers
+    it as a new slide part+relationship in the presentation. This is the
+    only approach that guarantees 100% fidelity with the original
+    template's theme/color-map resolution."""
+    source_slide = prs.slides[index]
+    source_part = source_slide.part
 
-    # Remove any placeholder shapes auto-added by the layout
-    for shape in list(dest.shapes):
-        shape._element.getparent().remove(shape._element)
+    new_slide_el = copy.deepcopy(source_part._element)
+    partname = prs.part.package.next_partname("/ppt/slides/slide%d.xml")
+    new_slide_part = SlidePart(partname, source_part.content_type, source_part.package, new_slide_el)
 
-    # Build a mapping of old rId -> new rId for all non-external relationships
-    # (images, media, etc.) referenced by the source slide.
-    rid_map = {}
-    for rel_id, rel in source.part.rels.items():
+    # Copy every relationship using the SAME rId as the source part, so all
+    # r:embed / r:link / r:id references inside the copied XML remain valid
+    # without any remapping. We write directly into the internal _rels dict
+    # using the same _Relationship value object python-pptx uses internally,
+    # since the public API only supports auto-assigned rIds.
+    from pptx.opc.package import _Relationship
+    from pptx.opc.packuri import PackURI
+    for old_rid, rel in source_part.rels.items():
         if rel.is_external:
-            continue
-        new_rid = dest.part.relate_to(rel.target_part, rel.reltype)
-        rid_map[rel_id] = new_rid
+            new_slide_part.rels._rels[old_rid] = _Relationship(
+                new_slide_part.partname.baseURI,
+                old_rid,
+                rel.reltype,
+                target_mode="External",
+                target=rel.target_ref,
+            )
+        else:
+            new_slide_part.rels._rels[old_rid] = _Relationship(
+                new_slide_part.partname.baseURI,
+                old_rid,
+                rel.reltype,
+                target_mode="Internal",
+                target=rel.target_part,
+            )
 
-    def remap_rids(element):
-        for attr_name in ("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed",
-                          "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}link",
-                          "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"):
-            old_rid = element.get(attr_name)
-            if old_rid and old_rid in rid_map:
-                element.set(attr_name, rid_map[old_rid])
-        for child in element:
-            remap_rids(child)
+    new_rid = prs.part.relate_to(
+        new_slide_part,
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide",
+    )
 
-    # Copy every shape element from source slide (preserves text, images, groups, formatting)
-    for shape in source.shapes:
-        new_el = copy.deepcopy(shape._element)
-        remap_rids(new_el)
-        dest.shapes._spTree.append(new_el)
+    sldIdLst = prs.slides._sldIdLst
+    existing_ids = [int(s.get("id")) for s in sldIdLst]
+    new_id = max(existing_ids) + 1 if existing_ids else 256
+    new_sldId = sldIdLst.makeelement(qn("p:sldId"), {"id": str(new_id)})
+    new_sldId.set(qn("r:id"), new_rid)
+    sldIdLst.append(new_sldId)
 
-    # Copy background (bg element) if present at slide level, remapping any image rIds too
-    src_bg = source._element.find(qn('p:bg'))
-    if src_bg is not None:
-        new_bg = copy.deepcopy(src_bg)
-        remap_rids(new_bg)
-        dest_bg = dest._element.find(qn('p:bg'))
-        if dest_bg is not None:
-            dest._element.remove(dest_bg)
-        dest._element.insert(0, new_bg)
-
-    return dest
-
-
-def move_slide(prs, old_index, new_index):
-    xml_slides = prs.slides._sldIdLst
-    slides = list(xml_slides)
-    xml_slides.remove(slides[old_index])
-    xml_slides.insert(new_index, slides[old_index])
+    return prs.slides[len(prs.slides) - 1]
 
 
 def delete_slide(prs, index):
     xml_slides = prs.slides._sldIdLst
     slides = list(xml_slides)
-    rId = slides[index].get(qn('r:id'))
+    rId = slides[index].get(qn("r:id"))
     prs.part.drop_rel(rId)
     xml_slides.remove(slides[index])
 
 
-def set_text(shape, text):
-    """Replace the shape's text while preserving the original formatting
-    (font name, size, bold, italic, color, alignment, autofit/wrap behavior)
-    taken from the template placeholder."""
-    tf = shape.text_frame
-    first_para = tf.paragraphs[0]
+def replace_token_in_run_list(paragraph, token, value):
+    """Replace a token that appears (possibly split across multiple runs)
+    within a paragraph, WITHOUT touching run formatting (rPr) of the run
+    that carries the token. If the token spans multiple runs, only the
+    first run's formatting is kept and the rest of the matching runs are
+    removed. Multi-line values create sibling paragraphs cloned from this
+    paragraph's pPr/formatting so every line matches the template style."""
+    runs = paragraph.runs
+    full_text = "".join(r.text for r in runs)
+    low = full_text.lower()
+    pos = low.find(token)
+    if pos == -1:
+        return False
 
-    # Capture run-level formatting (rPr) and paragraph-level formatting (pPr)
-    template_rpr_xml = None
-    template_para_pPr_xml = None
-    if first_para.runs:
-        rPr = first_para.runs[0]._r.find(qn('a:rPr'))
-        if rPr is not None:
-            template_rpr_xml = copy.deepcopy(rPr)
-    pPr = first_para._p.find(qn('a:pPr'))
-    if pPr is not None:
-        template_para_pPr_xml = copy.deepcopy(pPr)
+    lines = value.split("\n") if value else [""]
+    first_line, rest_lines = lines[0], lines[1:]
 
-    # Capture the text-frame-level bodyPr (autofit, wrap, insets) so long
-    # text shrinks-to-fit exactly as configured in the template placeholder.
-    template_bodyPr_xml = None
-    bodyPr = tf._txBody.find(qn('a:bodyPr'))
-    if bodyPr is not None:
-        template_bodyPr_xml = copy.deepcopy(bodyPr)
+    cum = 0
+    start_run = end_run = None
+    start_off = end_off = 0
+    for i, r in enumerate(runs):
+        rlen = len(r.text)
+        if start_run is None and cum + rlen > pos:
+            start_run = i
+            start_off = pos - cum
+        if cum + rlen >= pos + len(token):
+            end_run = i
+            end_off = pos + len(token) - cum
+            break
+        cum += rlen
 
-    tf.clear()
+    if start_run is None or end_run is None:
+        return False
 
-    # Reapply bodyPr (autofit/wrap/insets) exactly as in the template
-    if template_bodyPr_xml is not None:
-        existing_bodyPr = tf._txBody.find(qn('a:bodyPr'))
-        if existing_bodyPr is not None:
-            tf._txBody.remove(existing_bodyPr)
-        tf._txBody.insert(0, copy.deepcopy(template_bodyPr_xml))
+    sr = runs[start_run]
+    er = runs[end_run]
+    before = sr.text[:start_off]
+    after = er.text[end_off:]
 
-    p = tf.paragraphs[0]
-
-    # Reapply paragraph-level formatting (alignment, indent, etc.)
-    if template_para_pPr_xml is not None:
-        existing_pPr = p._p.find(qn('a:pPr'))
-        if existing_pPr is not None:
-            p._p.remove(existing_pPr)
-        p._p.insert(0, copy.deepcopy(template_para_pPr_xml))
-
-    lines = text.split("\n") if text else [""]
-    for i, line in enumerate(lines):
-        if i == 0:
-            para = p
-        else:
-            para = tf.add_paragraph()
-            if template_para_pPr_xml is not None:
-                para._p.insert(0, copy.deepcopy(template_para_pPr_xml))
-        run = para.add_run()
-        run.text = line
-        if template_rpr_xml is not None:
-            existing_rpr = run._r.find(qn('a:rPr'))
-            new_rpr = copy.deepcopy(template_rpr_xml)
-            if existing_rpr is not None:
-                run._r.remove(existing_rpr)
-            run._r.insert(0, new_rpr)
-        elif run.font.size is None:
-            run.font.size = Pt(22)
-
-    # Compute an explicit font scale so long multi-line lists (e.g. nominee
-    # lists) actually shrink to fit the placeholder box. Relying on an empty
-    # <a:normAutofit/> does not trigger shrinking in PowerPoint/LibreOffice
-    # unless fontScale is explicitly set, so we calculate it manually based
-    # on line count relative to a baseline of 4 lines fitting at 100%.
-    num_lines = len(lines)
-    baseline_lines = 4
-    if num_lines > baseline_lines:
-        scale_pct = max(40, int(100 * baseline_lines / num_lines))
+    sr.text = before + first_line
+    if start_run != end_run:
+        er.text = after
     else:
-        scale_pct = 100
+        sr.text = before + first_line + after
 
-    body = tf._txBody.find(qn('a:bodyPr'))
-    if body is not None:
-        for tag in ('a:normAutofit', 'a:spAutoFit', 'a:noAutofit'):
-            existing = body.find(qn(tag))
-            if existing is not None:
-                body.remove(existing)
-        norm = body.makeelement(qn('a:normAutofit'), {})
-        if scale_pct < 100:
-            norm.set('fontScale', str(scale_pct * 1000))
-            norm.set('lnSpcReduction', str(min(20, (100 - scale_pct)) * 1000))
-        body.append(norm)
+    for i in range(start_run + 1, end_run + (1 if start_run != end_run else 0)):
+        pass
+    if start_run != end_run:
+        for i in range(end_run - 1, start_run, -1):
+            r_el = runs[i]._r
+            r_el.getparent().remove(r_el)
 
-    # Also directly scale each run's font size as a fallback, since some
-    # renderers (older LibreOffice versions) ignore fontScale on normAutofit.
-    if scale_pct < 100:
-        for para in tf.paragraphs:
-            for run in para.runs:
-                if run.font.size is not None:
-                    run.font.size = Pt(int(run.font.size.pt * scale_pct / 100))
+    if rest_lines:
+        template_p_el = paragraph._p
+        parent = template_p_el.getparent()
+        insert_at = list(parent).index(template_p_el) + 1
+        template_rpr = sr._r.find(qn("a:rPr"))
+        for line in rest_lines:
+            new_p_el = copy.deepcopy(template_p_el)
+            for r_el in new_p_el.findall(qn("a:r")):
+                new_p_el.remove(r_el)
+            new_r_el = new_p_el.makeelement(qn("a:r"), {})
+            if template_rpr is not None:
+                new_r_el.append(copy.deepcopy(template_rpr))
+            t_el = new_r_el.makeelement(qn("a:t"), {})
+            t_el.text = line
+            new_r_el.append(t_el)
+            new_p_el.append(new_r_el)
+            parent.insert(insert_at, new_p_el)
+            insert_at += 1
+
+    return True
 
 
 def fill_shapes_recursive(shapes, mapping):
     for shape in shapes:
-        if shape.shape_type == 6 and hasattr(shape, "shapes"):  # group shape
+        if shape.shape_type == 6 and hasattr(shape, "shapes"):
             fill_shapes_recursive(shape.shapes, mapping)
             continue
         if not hasattr(shape, "text_frame") or not shape.has_text_frame:
             continue
-        text = shape.text_frame.text
-        if not text:
-            continue
-        low = text.lower()
-        matched = False
-        for token, key in TOKENS.items():
-            if token in low:
-                set_text(shape, mapping.get(key, ""))
-                matched = True
-                break
+        for paragraph in list(shape.text_frame.paragraphs):
+            low_text = paragraph.text.lower()
+            for token, key in TOKENS.items():
+                if token in low_text:
+                    replace_token_in_run_list(paragraph, token, mapping.get(key, ""))
+                    break
 
 
 def fill_slide(slide, mapping):
@@ -301,11 +276,9 @@ def build_deck(excel_path, template_path):
 
     prs = Presentation(template_path)
     nominee_idx, winner_idx = pick_template_indices(prs)
-    total_original = len(prs.slides)
 
     keys = sorted(set(nominee_groups) | set(winner_groups), key=lambda x: (x[0], x[1]))
 
-    generated_indices = []
     for key in keys:
         zone, category = key
         if key in nominee_groups:
@@ -320,7 +293,6 @@ def build_deck(excel_path, template_path):
                 "PLACEHOLDER_Y": entries[0]["placeholder_y"],
                 "PLACEHOLDER_Z": entries[0]["placeholder_z"],
             })
-            generated_indices.append(len(prs.slides.__iter__.__self__._sldIdLst) - 1)
         if key in winner_groups:
             entries = winner_groups[key]
             new_slide = duplicate_slide(prs, winner_idx)
@@ -333,9 +305,7 @@ def build_deck(excel_path, template_path):
                 "PLACEHOLDER_Y": entries[0]["placeholder_y"],
                 "PLACEHOLDER_Z": entries[0]["placeholder_z"],
             })
-            generated_indices.append(len(prs.slides.__iter__.__self__._sldIdLst) - 1)
 
-    # Remove original template slides (highest index first to keep indices valid)
     for idx in sorted({nominee_idx, winner_idx}, reverse=True):
         delete_slide(prs, idx)
 
