@@ -86,9 +86,9 @@ def group_rows(rows):
 
 def detect_role(slide):
     text = " ".join([shape.text for shape in slide.shapes if hasattr(shape, "text") and shape.text]).lower()
-    if "<<nominees>>" in text:
+    if "<<nominees>>" in text or "nominees" in text:
         return "nominee"
-    if "<<winner>>" in text:
+    if "<<winner>>" in text or "winner" in text:
         return "winner"
     return "generic"
 
@@ -110,6 +110,10 @@ def fill_slide(slide, mapping):
         for token, key in TOKENS.items():
             if token.lower() in low:
                 set_text(shape, mapping.get(key, ""))
+            elif key == "NOMINEES_WORD" and token.lower() == "<<nominees-word>>":
+                set_text(shape, "NOMINEES")
+            elif key == "WINNER_WORD" and token.lower() == "<<winner-word>>":
+                set_text(shape, "WINNER")
 
 
 def clone_template_slide(template_slide, out_prs):
