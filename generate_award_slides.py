@@ -251,6 +251,30 @@ def replace_token_in_run_list(paragraph, token, value):
     return True
 
 
+def ensure_paragraph_spacing(shape, token):
+    """Add a small breathing-room space-after on the placeholder's paragraph
+    so that when the category/nominee text wraps to multiple lines, it does
+    not visually collide with the box below it (e.g. Award Category wrapping
+    into the Nominees list). Only applied to the category/zone placeholders,
+    since the nominee/winner list already gets its own per-line spacing."""
+    if token not in ("<<award category>>", "<<zone>>"):
+        return
+    tf = shape.text_frame
+    for paragraph in tf.paragraphs:
+        pPr = paragraph._p.find(qn("a:pPr"))
+        if pPr is None:
+            pPr = paragraph._p.makeelement(qn("a:pPr"), {})
+            paragraph._p.insert(0, pPr)
+        for old_tag in ("a:spcAft",):
+            existing = pPr.find(qn(old_tag))
+            if existing is not None:
+                pPr.remove(existing)
+        spcAft = pPr.makeelement(qn("a:spcAft"), {})
+        spcPts = spcAft.makeelement(qn("a:spcPts"), {"val": "1200"})
+        spcAft.append(spcPts)
+        pPr.append(spcAft)
+
+
 def fill_shapes_recursive(shapes, mapping):
     for shape in shapes:
         if shape.shape_type == 6 and hasattr(shape, "shapes"):
@@ -263,6 +287,7 @@ def fill_shapes_recursive(shapes, mapping):
             for token, key in TOKENS.items():
                 if token in low_text:
                     replace_token_in_run_list(paragraph, token, mapping.get(key, ""))
+                    ensure_paragraph_spacing(shape, token)
                     break
 
 
