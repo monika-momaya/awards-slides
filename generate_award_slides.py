@@ -127,20 +127,11 @@ def clone_template_slide(template_slide, out_prs):
 
 
 def pick_template_slides(prs):
-    nominee = None
-    winner = None
-    generic = prs.slides[0] if len(prs.slides) > 0 else None
-    for s in prs.slides:
-        txt = " ".join([shape.text for shape in s.shapes if hasattr(shape, "text") and shape.text]).lower()
-        if nominee is None and "nominees" in txt:
-            nominee = s
-        if winner is None and "winner" in txt:
-            winner = s
-    if nominee is None:
-        nominee = generic
-    if winner is None:
-        winner = generic if generic is not None else nominee
-    return nominee, winner
+    if len(prs.slides) == 1:
+        return prs.slides[0], prs.slides[0]
+    if len(prs.slides) >= 2:
+        return prs.slides[0], prs.slides[1]
+    raise RuntimeError("Template has no slides")
 
 
 def build_deck(excel_path, template_path):
