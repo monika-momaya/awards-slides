@@ -117,6 +117,19 @@ def pick_template_slides(prs):
     raise RuntimeError("Template has no slides")
 
 
+def fill_slide(slide, mapping):
+    for shape in slide.shapes:
+        if not hasattr(shape, "text"):
+            continue
+        txt = shape.text or ""
+        for token, value in mapping.items():
+            if token.lower() in txt.lower():
+                try:
+                    shape.text = value
+                except Exception:
+                    pass
+
+
 def build_deck(excel_path, template_path):
     rows = read_rows(excel_path)
     nominee_groups, winner_groups = group_rows(rows)
