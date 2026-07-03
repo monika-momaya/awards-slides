@@ -320,16 +320,20 @@ def build_deck(excel_path, template_path):
             })
         if key in winner_groups:
             entries = winner_groups[key]
-            new_slide = duplicate_slide(prs, winner_idx)
-            fill_slide(new_slide, {
-                "ZONE": zone,
-                "AWARD CATEGORY": category,
-                "WINNER": "\n".join(e["winner_name"] for e in entries),
-                "WINNER_WORD": "WINNER",
-                "PLACEHOLDER_X": entries[0]["placeholder_x"],
-                "PLACEHOLDER_Y": entries[0]["placeholder_y"],
-                "PLACEHOLDER_Z": entries[0]["placeholder_z"],
-            })
+            # Winners always get one slide per winner, even when multiple
+            # winners share the same Zone + Award Category (e.g. joint
+            # winners or multiple sub-winners), so each gets full visibility.
+            for entry in entries:
+                new_slide = duplicate_slide(prs, winner_idx)
+                fill_slide(new_slide, {
+                    "ZONE": zone,
+                    "AWARD CATEGORY": category,
+                    "WINNER": entry["winner_name"],
+                    "WINNER_WORD": "WINNER",
+                    "PLACEHOLDER_X": entry["placeholder_x"],
+                    "PLACEHOLDER_Y": entry["placeholder_y"],
+                    "PLACEHOLDER_Z": entry["placeholder_z"],
+                })
 
     for idx in sorted({nominee_idx, winner_idx}, reverse=True):
         delete_slide(prs, idx)
