@@ -77,15 +77,24 @@ def read_rows(xlsx_path):
 
 
 def group_rows(rows):
+    """Group rows by (zone, award_category), while also recording the order
+    in which each category key FIRST appears in the original Excel sheet.
+    This lets build_deck() emit slides in the same sequence as the Excel
+    file, which is critical for the emcee's script order."""
     nominee_groups = defaultdict(list)
     winner_groups = defaultdict(list)
+    key_order = []
+    seen = set()
     for r in rows:
         key = (r["zone"], r["award_category"])
+        if key not in seen:
+            seen.add(key)
+            key_order.append(key)
         if r["nominee_name"]:
             nominee_groups[key].append(r)
         if r["winner_name"]:
             winner_groups[key].append(r)
-    return nominee_groups, winner_groups
+    return nominee_groups, winner_groups, key_order
 
 
 def find_slide_index_with_token(prs, token):
@@ -297,12 +306,16 @@ def fill_slide(slide, mapping):
 
 def build_deck(excel_path, template_path):
     rows = read_rows(excel_path)
-    nominee_groups, winner_groups = group_rows(rows)
+    nominee_groups, winner_groups, key_order = group_rows(rows)
 
     prs = Presentation(template_path)
     nominee_idx, winner_idx = pick_template_indices(prs)
 
-    keys = sorted(set(nominee_groups) | set(winner_groups), key=lambda x: (x[0], x[1]))
+    # Preserve the exact order categories first appear in the Excel file
+    # (this drives the emcee's announcement sequence), rather than sorting
+    # alphabetically. Within each category, the nominee slide (if any)
+    # comes first, immediately followed by that category's winner slide(s).
+    keys = key_order
 
     for key in keys:
         zone, category = key
